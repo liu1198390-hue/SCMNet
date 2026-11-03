@@ -1,0 +1,54 @@
+{
+  "model": "SCMNet",
+  "torch": "2.4.1+cpu",
+  "parameters": 25505688,
+  "parameters_M": 25.505688,
+  "components": {
+    "encoder": 22137907,
+    "decode_head": 3339491,
+    "hr_mdr": 28290
+  },
+  "model_config": {
+    "model_version": "SCMNet",
+    "dims": [
+      96,
+      192,
+      384,
+      768
+    ],
+    "depths": [
+      2,
+      2,
+      9,
+      2
+    ],
+    "patch_size": 4,
+    "d_state": 16,
+    "d_conv": 3,
+    "expand": 2,
+    "drop_path_rate": 0.2,
+    "decoder_channels": 128,
+    "ppm_channels": 128,
+    "detail_channels": 32,
+    "embedding_dim": 8,
+    "refinement_channels": 64,
+    "use_checkpoint": false
+  },
+  "smoke": {
+    "input": [
+      1,
+      3,
+      32,
+      48
+    ],
+    "region": [
+      1,
+      1,
+      32,
+      48
+    ],
+    "finite_outputs": true,
+    "finite_backward": true,
+    "backend": "torch_reference"
+  }
+}

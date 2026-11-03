@@ -1,0 +1,16 @@
+{
+  "compared_with": "Original model and loss definitions before release cleanup",
+  "parameters": 25505688,
+  "state_dict_strict_load": true,
+  "foreground_and_all_auxiliary_outputs_exactly_equal": true,
+  "loss_and_all_components_exactly_equal": true,
+  "backend": "PyTorch CPU reference",
+  "input": [
+    1,
+    3,
+    32,
+    48
+  ],
+  "local_tests_passed": 8,
+  "cuda_training_executed": false
+}
