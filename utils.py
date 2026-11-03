@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import os
 import random
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Dict, Optional, Sequence
 
 import numpy as np
 import torch
+from PIL import Image
 
 IMG_EXTS = (".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
 
@@ -347,3 +349,58 @@ class Tee:
     def flush(self):
         for stream in self.streams:
             stream.flush()
+
+
+def read_instances(path):
+    arr = np.asarray(Image.open(path))
+    if arr.ndim == 3:
+        rgb = arr[..., :3].astype(np.int32)
+        arr = rgb[..., 0] + 256 * rgb[..., 1] + 65536 * rgb[..., 2]
+    return arr.astype(np.int32)
+
+
+def _pixel_metrics(pred, gt):
+    tp = int(np.count_nonzero(pred & gt))
+    fp = int(np.count_nonzero(pred & ~gt))
+    fn = int(np.count_nonzero(~pred & gt))
+    return {
+        "pixel_F1": 2 * tp / max(2 * tp + fp + fn, 1),
+        "pixel_IoU": tp / max(tp + fp + fn, 1),
+        "pixel_precision": tp / max(tp + fp, 1),
+        "pixel_recall": tp / max(tp + fn, 1),
+        "fp_pixels": fp,
+        "fn_pixels": fn,
+    }
+
+
+def _instance_error_counts(pred, gt):
+    """Count GT glands touched by >1 predicted gland, and vice versa."""
+    both = (pred > 0) & (gt > 0)
+    if not both.any():
+        return {"merged_gt": 0, "split_gt": 0, "missed_gt": int(np.unique(gt[gt > 0]).size)}
+    pairs, overlaps = np.unique(
+        np.stack((gt[both], pred[both]), axis=1), axis=0, return_counts=True
+    )
+    all_ids, gt_sizes = np.unique(gt[gt > 0], return_counts=True)
+    relevant = overlaps >= np.maximum(10, 0.05 * gt_sizes[np.searchsorted(all_ids, pairs[:, 0])])
+    pairs = pairs[relevant]
+    if not len(pairs):
+        return {"merged_gt": 0, "split_gt": 0, "missed_gt": int(np.unique(gt[gt > 0]).size)}
+    gt_ids, gt_counts = np.unique(pairs[:, 0], return_counts=True)
+    _, pred_counts = np.unique(pairs[:, 1], return_counts=True)
+    all_gt = np.unique(gt[gt > 0])
+    return {
+        "merged_gt": int(pred_counts[pred_counts > 1].sum()),
+        "split_gt": int((gt_counts > 1).sum()),
+        "missed_gt": int(all_gt.size - gt_ids.size),
+    }
+
+
+def _write_csv(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        return
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)

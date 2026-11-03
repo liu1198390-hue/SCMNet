@@ -1,6 +1,6 @@
 # Modified for SCMNet: relation-conditioned transitions and one scan implementation.
 """VMamba/VM-UNet-derived VSS definitions with relation-aware transitions.
-Upstream components are covered by LICENSE and THIRD_PARTY_NOTICES.md.
+Upstream components are covered by LICENSE and the README acknowledgements.
 """
 
 import math

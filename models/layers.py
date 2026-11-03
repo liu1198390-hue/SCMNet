@@ -1,4 +1,4 @@
-"""Shared convolution/pyramid layers, extracted without the production model."""
+"""Convolution, normalization and pyramid-pooling layers."""
 
 from typing import Iterable
 

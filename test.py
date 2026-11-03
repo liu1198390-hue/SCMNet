@@ -13,17 +13,20 @@ import torch
 from PIL import Image
 from torch.nn import functional as F
 
-from evaluation_helpers import _instance_error_counts, _pixel_metrics, _write_csv, read_instances
 from models import SCMNet
 from postprocess import decode_instances
 from utils import (
     Tee,
+    _instance_error_counts,
+    _pixel_metrics,
+    _write_csv,
     center_weight_np,
     find_mask,
     glass_object_metrics,
     image_to_tensor,
     list_images,
     mean_glass_object_metrics,
+    read_instances,
     reflect_pad_image_np,
     sliding_positions,
 )
