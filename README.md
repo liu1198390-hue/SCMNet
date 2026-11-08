@@ -56,7 +56,8 @@ python train.py \
 ```
 
 The default input size is 464, with AdamW and initial learning rate `1e-4`.
-Checkpoints are selected by validation object F1. To resume, add
+For manuscript evaluation, use the checkpoint with the highest validation
+object Dice. To resume, add
 `--resume outputs/seed0/checkpoints/latest.pth` to the same command.
 For repeated runs, change `--seed` and `--output_dir` for each seed.
 
@@ -64,7 +65,7 @@ For repeated runs, change `--seed` and `--output_dir` for each seed.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python test.py \
-  --ckpt outputs/seed0/checkpoints/best_obj_F1.pth \
+  --ckpt outputs/seed0/checkpoints/best_obj_Dice.pth \
   --data_path /path/to/whole_images --split test \
   --save_dir outputs/seed0/test --save_predictions
 ```
