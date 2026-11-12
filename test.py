@@ -11,10 +11,11 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
+from scipy import ndimage as ndi
 from torch.nn import functional as F
 
 from models import SCMNet
-from postprocess import decode_instances
+from postprocess import OFFSETS, decode_instances
 from utils import (
     Tee,
     _instance_error_counts,
@@ -35,7 +36,10 @@ from utils import (
 def load_model(path, device):
     """Strictly load current checkpoints or checkpoints from the original run."""
     checkpoint = torch.load(str(path), map_location="cpu", weights_only=True)
-    if checkpoint.get("model_version") not in {SCMNet.model_version, "scmnet_relation_v2"}:
+    if checkpoint.get("model_version") not in {
+        SCMNet.model_version,
+        "scmnet_relation_v2",
+    }:
         raise ValueError("Unsupported checkpoint: expected SCMNet model metadata")
     config = dict(checkpoint["model_config"])
     config.pop("model_version", None)
@@ -46,7 +50,13 @@ def load_model(path, device):
 
 @torch.no_grad()
 def predict_image(
-    model, image, device, tile_size=464, stride=232, fusion="center_weighted", return_features=False
+    model,
+    image,
+    device,
+    tile_size=464,
+    stride=232,
+    fusion="center_weighted",
+    return_features=False,
 ):
     if tile_size < 32 or not 1 <= stride <= tile_size:
         raise ValueError("Require tile_size >= 32 and 1 <= stride <= tile_size")
@@ -62,7 +72,8 @@ def predict_image(
     embedding_dim = int(model.model_config.get("embedding_dim", 8))
     base_channels = 10 + embedding_dim
     accumulator = np.zeros(
-        (base_channels + 7 if return_features else base_channels, height, width), dtype=np.float32
+        (base_channels + 7 if return_features else base_channels, height, width),
+        dtype=np.float32,
     )
     denominator = np.zeros((height, width), dtype=np.float32)
     for y in sliding_positions(height, tile_size, stride):
@@ -92,7 +103,10 @@ def predict_image(
                 for alpha in aux["fusion_alpha"]:
                     extra.append(
                         F.interpolate(
-                            alpha, size=(tile_size, tile_size), mode="bilinear", align_corners=False
+                            alpha,
+                            size=(tile_size, tile_size),
+                            mode="bilinear",
+                            align_corners=False,
                         )
                     )
                 output = torch.cat((output, *extra), dim=1)
@@ -105,7 +119,9 @@ def predict_image(
     if not np.isfinite(values).all():
         raise RuntimeError("Model produced non-finite maps")
     embedding = values[10:base_channels]
-    embedding = embedding / np.maximum(np.linalg.norm(embedding, axis=0, keepdims=True), 1e-6)
+    embedding = embedding / np.maximum(
+        np.linalg.norm(embedding, axis=0, keepdims=True), 1e-6
+    )
     features = {}
     if return_features:
         for index, name in enumerate(
@@ -124,22 +140,76 @@ def predict_image(
     return values[0], values[1:9], values[9], embedding, features
 
 
-def save_predictions(directory, stem, image, gt, labels, region):
+def decode_boundary_instances(
+    region,
+    relation,
+    foreground_threshold,
+    boundary_threshold,
+    keep_threshold,
+    opening_radius,
+    min_area,
+):
+    """Block low-affinity foreground edges, then clean and label the mask."""
+    foreground = region >= foreground_threshold
+    boundary_score = np.zeros_like(region)
+    height, width = region.shape
+    # Only one-pixel affinities localize a boundary to the edge endpoints.
+    for channel, (dy, dx) in enumerate(OFFSETS[:4]):
+        y0, y1 = max(0, -dy), min(height, height - dy)
+        x0, x1 = max(0, -dx), min(width, width - dx)
+        source = np.s_[y0:y1, x0:x1]
+        target = np.s_[y0 + dy : y1 + dy, x0 + dx : x1 + dx]
+        score = np.where(
+            foreground[source] & foreground[target], 1 - relation[channel][source], 0
+        )
+        np.maximum(boundary_score[source], score, out=boundary_score[source])
+        np.maximum(boundary_score[target], score, out=boundary_score[target])
+
+    binary = foreground & (
+        (boundary_score < boundary_threshold) | (region >= keep_threshold)
+    )
+    if opening_radius:
+        coords = np.arange(-opening_radius, opening_radius + 1)
+        disk = coords[:, None] ** 2 + coords[None, :] ** 2 <= opening_radius**2
+        eroded = ndi.binary_erosion(binary, structure=disk, border_value=1)
+        binary = ndi.binary_dilation(eroded, structure=disk, border_value=0)
+    binary = ndi.binary_fill_holes(binary)
+    if min_area > 1:
+        components, _ = ndi.label(binary)
+        sizes = np.bincount(components.ravel())
+        binary &= sizes[components] >= min_area
+    labels, _ = ndi.label(binary, structure=np.ones((3, 3), dtype=bool))
+    return binary, labels, boundary_score
+
+
+def save_predictions(directory, stem, image, gt, labels, region, boundary_score=None):
     """Save integer instance IDs, foreground probability and a visual triptych."""
     for name in ("instances", "probability", "preview"):
         (directory / name).mkdir(parents=True, exist_ok=True)
-    Image.fromarray(labels.astype(np.int32)).save(directory / "instances" / f"{stem}.tiff")
-    Image.fromarray(region.astype(np.float32)).save(directory / "probability" / f"{stem}.tiff")
+    Image.fromarray(labels.astype(np.int32)).save(
+        directory / "instances" / f"{stem}.tiff"
+    )
+    Image.fromarray(region.astype(np.float32)).save(
+        directory / "probability" / f"{stem}.tiff"
+    )
+    if boundary_score is not None:
+        scores = directory / "boundary_score"
+        scores.mkdir(exist_ok=True)
+        Image.fromarray(boundary_score.astype(np.float32)).save(scores / f"{stem}.tiff")
     panels = [image]
     for mask in (gt, labels):
         binary = np.repeat(((mask > 0) * 255).astype(np.uint8)[..., None], 3, axis=2)
         # Retain visible separation between touching instance IDs.
         border = np.zeros(mask.shape, dtype=bool)
-        border[:, 1:] |= (mask[:, 1:] != mask[:, :-1]) & (mask[:, 1:] > 0) & (mask[:, :-1] > 0)
+        border[:, 1:] |= (
+            (mask[:, 1:] != mask[:, :-1]) & (mask[:, 1:] > 0) & (mask[:, :-1] > 0)
+        )
         border[1:] |= (mask[1:] != mask[:-1]) & (mask[1:] > 0) & (mask[:-1] > 0)
         binary[border] = 0
         panels.append(binary)
-    Image.fromarray(np.concatenate(panels, axis=1)).save(directory / "preview" / f"{stem}.png")
+    Image.fromarray(np.concatenate(panels, axis=1)).save(
+        directory / "preview" / f"{stem}.png"
+    )
 
 
 def evaluate_split(
@@ -159,15 +229,33 @@ def evaluate_split(
     similarity_threshold=0.45,
     min_area=100,
     limit=0,
+    postprocess="graph",
+    foreground_threshold=0.5,
+    boundary_threshold=0.60,
+    keep_threshold=0.75,
+    opening_radius=5,
 ):
-    """Report image-averaged object metrics using the original instance decoder."""
+    """Report image-averaged object metrics for the selected instance decoder."""
+    if postprocess not in {"graph", "boundary"}:
+        raise ValueError("postprocess must be graph or boundary")
+    if postprocess == "boundary" and (
+        not 0 <= foreground_threshold <= keep_threshold <= 1
+        or not 0 < boundary_threshold <= 1
+        or opening_radius < 0
+        or min_area < 0
+    ):
+        raise ValueError(
+            "Invalid boundary-mode thresholds, opening radius or minimum area"
+        )
     device = torch.device(device)
     data_root = Path(data_root)
     image_dir = data_root / "images" / split
     label_dir = data_root / "labels_instance_cc" / split
     images = list_images(image_dir)
     if not images or not label_dir.is_dir():
-        raise FileNotFoundError(f"Missing images or instance labels: {data_root} / {split}")
+        raise FileNotFoundError(
+            f"Missing images or instance labels: {data_root} / {split}"
+        )
     if limit:
         images = images[:limit]
     model.eval()
@@ -175,24 +263,38 @@ def evaluate_split(
     start = time.perf_counter()
     for number, image_path in enumerate(images, 1):
         image = np.asarray(Image.open(image_path).convert("RGB"), dtype=np.uint8)
-        gt = read_instances(find_mask(label_dir, image_path.stem, "instance", image_path))
+        gt = read_instances(
+            find_mask(label_dir, image_path.stem, "instance", image_path)
+        )
         if gt.shape != image.shape[:2]:
             raise ValueError(f"Image and label dimensions differ: {image_path}")
         region, relation, contact, embedding, _ = predict_image(
             model, image, device, tile_size, stride, fusion
         )
-        binary, labels = decode_instances(
-            region,
-            relation,
-            contact,
-            embedding,
-            candidate_threshold,
-            seed_threshold,
-            edge_threshold,
-            contact_threshold,
-            similarity_threshold,
-            min_area,
-        )
+        boundary_score = None
+        if postprocess == "boundary":
+            binary, labels, boundary_score = decode_boundary_instances(
+                region,
+                relation,
+                foreground_threshold,
+                boundary_threshold,
+                keep_threshold,
+                opening_radius,
+                min_area,
+            )
+        else:
+            binary, labels = decode_instances(
+                region,
+                relation,
+                contact,
+                embedding,
+                candidate_threshold,
+                seed_threshold,
+                edge_threshold,
+                contact_threshold,
+                similarity_threshold,
+                min_area,
+            )
         obj = glass_object_metrics(labels, gt)
         errors = _instance_error_counts(labels, gt)
         row = {
@@ -209,7 +311,15 @@ def evaluate_split(
         rows.append(row)
         object_metrics.append(obj)
         if output_dir is not None and save_visuals:
-            save_predictions(Path(output_dir), image_path.stem, image, gt, labels, region)
+            save_predictions(
+                Path(output_dir),
+                image_path.stem,
+                image,
+                gt,
+                labels,
+                region,
+                boundary_score,
+            )
         print(
             f"[{split} {number}/{len(images)}] {image_path.stem} "
             f"F1={obj['F1']:.4f} Dice={obj['Dice']:.4f}",
@@ -219,7 +329,9 @@ def evaluate_split(
     summary = {
         "split": split,
         "count": len(rows),
-        **{f"object_{key}": mean_obj[key] for key in ("F1", "Dice", "IoU", "Hausdorff")},
+        **{
+            f"object_{key}": mean_obj[key] for key in ("F1", "Dice", "IoU", "Hausdorff")
+        },
         **{
             key: float(np.mean([r[key] for r in rows]))
             for key in (
@@ -257,6 +369,16 @@ def main():
     parser.add_argument(
         "--fusion", choices=("uniform", "center_weighted"), default="center_weighted"
     )
+    parser.add_argument(
+        "--postprocess",
+        choices=("graph", "boundary"),
+        default="graph",
+        help="Instance decoder (default: graph). Boundary mode uses one-pixel affinities.",
+    )
+    parser.add_argument("--foreground_threshold", type=float, default=0.5)
+    parser.add_argument("--boundary_threshold", type=float, default=0.60)
+    parser.add_argument("--keep_threshold", type=float, default=0.75)
+    parser.add_argument("--opening_radius", type=int, default=5)
     parser.add_argument("--candidate_threshold", type=float, default=0.35)
     parser.add_argument("--seed_threshold", type=float, default=0.65)
     parser.add_argument("--edge_threshold", type=float, default=0.5)
@@ -267,15 +389,26 @@ def main():
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
     if args.device.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError("CUDA unavailable; use --device cpu only for small-input checks")
+        raise RuntimeError(
+            "CUDA unavailable; use --device cpu only for small-input checks"
+        )
     args.save_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
     model, checkpoint = load_model(args.ckpt, device)
     config = {
-        key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in vars(args).items()
     }
-    config.update(model_config=model.model_config, checkpoint_epoch=checkpoint.get("epoch"))
-    (args.save_dir / "test_config.json").write_text(json.dumps(config, indent=2), encoding="utf8")
+    config.update(
+        model_config=model.model_config, checkpoint_epoch=checkpoint.get("epoch")
+    )
+    if args.postprocess == "boundary":
+        config["boundary_source"] = (
+            "maximum one-minus-affinity over adjacent foreground pairs"
+        )
+    (args.save_dir / "test_config.json").write_text(
+        json.dumps(config, indent=2), encoding="utf8"
+    )
     stdout, stderr = sys.stdout, sys.stderr
     with (args.save_dir / "test.log").open("w", encoding="utf8") as log:
         try:
@@ -297,6 +430,11 @@ def main():
                 similarity_threshold=args.similarity_threshold,
                 min_area=args.min_area,
                 limit=args.limit,
+                postprocess=args.postprocess,
+                foreground_threshold=args.foreground_threshold,
+                boundary_threshold=args.boundary_threshold,
+                keep_threshold=args.keep_threshold,
+                opening_radius=args.opening_radius,
             )
         finally:
             sys.stdout, sys.stderr = stdout, stderr
