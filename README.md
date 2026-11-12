@@ -1,8 +1,12 @@
 # SCMNet
 
 Gland instance segmentation with relation-aware state-space encoding,
-pyramid fusion and high-resolution refinement.
-The default model has **25,505,688 parameters (25.51M)**.
+pyramid fusion and high-resolution refinement. The released model has
+**25,505,688 trainable parameters (25.51M)**. It predicts foreground,
+local affinities, contact gaps and instance embeddings. Its boundary
+decoder derives a boundary score from adjacent foreground affinities.
+The manuscript's dedicated boundary head and multi-scale Q/C paths
+require their corresponding model implementation and checkpoints.
 
 ## Installation
 
@@ -52,12 +56,14 @@ python train.py \
   --val_data_path /path/to/whole_images \
   --pretrained /path/to/vmamba_tiny_e292.pth \
   --output_dir outputs/seed0 \
-  --seed 0 --epochs 30 --batch_size 2 --amp --deterministic
+  --seed 0 --epochs 30 --batch_size 2 --amp --deterministic \
+  --val_postprocess boundary
 ```
 
 The default input size is 464, with AdamW and initial learning rate `1e-4`.
-For manuscript evaluation, use the checkpoint with the highest validation
-object Dice. To resume, add
+Use batch size 2 for GlaS and CRAG or 4 for GZMH. The validation decoder is
+recorded in each new checkpoint. Select the checkpoint with the highest
+whole-image validation object Dice. To resume, add
 `--resume outputs/seed0/checkpoints/latest.pth` to the same command.
 For repeated runs, change `--seed` and `--output_dir` for each seed.
 
@@ -67,11 +73,21 @@ For repeated runs, change `--seed` and `--output_dir` for each seed.
 CUDA_VISIBLE_DEVICES=0 python test.py \
   --ckpt outputs/seed0/checkpoints/best_obj_Dice.pth \
   --data_path /path/to/whole_images --split test \
-  --save_dir outputs/seed0/test --save_predictions
+  --save_dir outputs/seed0/test --save_predictions \
+  --postprocess boundary
 ```
 
 For GlaS, use `--split testA` or `--split testB`; a combined `test` directory
 can also be prepared. CRAG and GZMH use `--split test`.
+The example uses 464-pixel tiles, a 232-pixel stride and center-weighted
+Hann fusion with a 0.05 weight floor. The boundary decoder uses foreground,
+boundary and foreground-keep thresholds of 0.50, 0.60 and 0.75. It applies
+disk opening (radius 5), fills holes, removes components smaller than 100
+pixels, then labels instances with eight-connectivity. Use the same
+decoder for validation and test. With no `--postprocess` argument, test
+uses the checkpoint's validation decoder, falling back to `graph` for
+earlier checkpoints.
+
 Evaluation saves object F1, Dice, IoU and Hausdorff metrics. With
 `--save_predictions`, it also exports instance masks and prediction previews.
 See `python train.py --help` and `python test.py --help` for all options.

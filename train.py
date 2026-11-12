@@ -33,6 +33,7 @@ def _save(path, epoch, model, optimizer, scaler, best, args):
         "best": best,
         "model_config": model.model_config,
         "model_version": model.model_version,
+        "val_postprocess": args.val_postprocess,
         "seed": args.seed,
     }
     tmp = path.with_suffix(".tmp")
@@ -110,6 +111,8 @@ def train(args):
         checkpoint = torch.load(str(args.resume), map_location="cpu", weights_only=True)
         if checkpoint.get("model_version") not in {model.model_version, "scmnet_relation_v2"}:
             raise RuntimeError("Resume checkpoint model version mismatch")
+        if checkpoint.get("val_postprocess", "graph") != args.val_postprocess:
+            raise RuntimeError("Resume checkpoint validation decoder mismatch")
         model.load_state_dict(checkpoint["model"], strict=True)
         optimizer.load_state_dict(checkpoint["optimizer"])
         scaler.load_state_dict(checkpoint.get("scaler", {}))
@@ -133,8 +136,8 @@ def train(args):
             "model_config": model.model_config,
             "trainable_parameters": count_parameters(model),
             "supervision": "region, same-instance edges, contact gaps, identity pairs and within-instance foreground paths from augmented instance IDs",
-            "selection": "full-image val object F1",
-            "postprocess": "contact-barrier and identity-gated relation components; no opening or hole filling",
+            "selection": "full-image val object Dice",
+            "postprocess": args.val_postprocess,
             "augmentation": {
                 "horizontal_flip_p": 0.5,
                 "vertical_flip_p": 0.5,
@@ -255,6 +258,7 @@ def train(args):
                 tile_size=args.input_size,
                 stride=args.stride,
                 fusion=args.fusion,
+                postprocess=args.val_postprocess,
                 candidate_threshold=args.candidate_threshold,
                 seed_threshold=args.seed_threshold,
                 edge_threshold=args.edge_threshold,
@@ -297,8 +301,8 @@ def train(args):
                 _save(ckpt_dir / filename, epoch, model, optimizer, scaler, best, args)
         _save(ckpt_dir / "latest.pth", epoch, model, optimizer, scaler, best, args)
         (args.output_dir / "best_summary.txt").write_text(
-            "selected_metric: object_F1\nselected_best: {:.6f}\nselected_best_epoch: {}\n\n".format(
-                best["object_F1"], best.get("object_F1_epoch", 0)
+            "selected_metric: object_Dice\nselected_best: {:.6f}\nselected_best_epoch: {}\n\n".format(
+                best["object_Dice"], best.get("object_Dice_epoch", 0)
             )
             + "\n".join(f"{key}: {value}" for key, value in best.items())
             + "\n",
@@ -311,6 +315,12 @@ def main():
     parser.add_argument("--train_data_path", type=Path, required=True)
     parser.add_argument("--val_data_path", type=Path, required=True)
     parser.add_argument("--val_split", default="val")
+    parser.add_argument(
+        "--val_postprocess",
+        choices=("graph", "boundary"),
+        default="graph",
+        help="Whole-image validation decoder (default: graph).",
+    )
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--pretrained", type=Path)
     parser.add_argument("--resume", type=Path)

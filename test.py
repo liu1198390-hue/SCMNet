@@ -372,8 +372,8 @@ def main():
     parser.add_argument(
         "--postprocess",
         choices=("graph", "boundary"),
-        default="graph",
-        help="Instance decoder (default: graph). Boundary mode uses one-pixel affinities.",
+        help="Instance decoder. Defaults to the checkpoint's validation decoder, "
+        "or graph for earlier checkpoints. Boundary mode uses one-pixel affinities.",
     )
     parser.add_argument("--foreground_threshold", type=float, default=0.5)
     parser.add_argument("--boundary_threshold", type=float, default=0.60)
@@ -395,6 +395,7 @@ def main():
     args.save_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
     model, checkpoint = load_model(args.ckpt, device)
+    args.postprocess = args.postprocess or checkpoint.get("val_postprocess", "graph")
     config = {
         key: str(value) if isinstance(value, Path) else value
         for key, value in vars(args).items()
